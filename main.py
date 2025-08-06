@@ -586,8 +586,10 @@ async def handle_admin_commands(update: Update,
 
 
 def main():
+    print("=== Начало запуска бота ===")  # Проверка, что код вообще запускается
     print(f"Python-Telegram-Bot version: {telegram.__version__}")
     try:
+        print("🟢 Инициализация бота...")
         TOKEN = "7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w"
         application = Application.builder().token(TOKEN).build()
 
