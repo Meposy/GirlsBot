@@ -43,9 +43,13 @@ app = Flask(__name__)
 def home():
     return "Bot is alive!"
 
+@app.route('/health')
+def health():
+    return "OK", 200
+
 def run_flask():
     """Запускает Flask с обработкой ошибок и автоматическим выбором порта"""
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     
     # Отключаем вывод логов Flask
     flask_log = logging.getLogger('werkzeug')
@@ -53,11 +57,13 @@ def run_flask():
     
     logger.info(f"🟢 Flask запускается на порту {port}")
     
-    # Используем waitress для production-режима
-    if os.environ.get('ENV') == 'PRODUCTION':
+    try:
+        # Пытаемся использовать waitress для production
         from waitress import serve
         serve(app, host="0.0.0.0", port=port)
-    else:
+    except ImportError:
+        # Fallback на dev-сервер, если waitress не установлен
+        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
         app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ====== Константы ======
