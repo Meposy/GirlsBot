@@ -36,52 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ====== Flask App ======
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def is_port_in_use(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('localhost', port)) == 0
-
-def run_flask():
-    """Запускает Flask сервер с обработкой ошибок"""
-    port = int(os.environ.get('PORT', 10000))
-    
-    if is_port_in_use(port):
-        logger.warning(f"Port {port} is already in use, skipping Flask")
-        return
-    
-    # Настройка логгирования Flask
-    flask_log = logging.getLogger('werkzeug')
-    flask_log.setLevel(logging.WARNING)
-    
-    logger.info(f"🟢 Flask запускается на порту {port}")
-    
-    try:
-        from waitress import serve
-        serve(app, 
-              host="0.0.0.0", 
-              port=port,
-              threads=1,
-              channel_timeout=60)
-    except ImportError:
-        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
-        app.run(host='0.0.0.0', 
-                port=port, 
-                debug=False, 
-                use_reloader=False,
-                threaded=False)
-    except Exception as e:
-        logger.error(f"🔴 Ошибка Flask: {e}")
-
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
 CHANNEL_ID = "@VLV_LP"
@@ -95,31 +49,35 @@ LOCK_FILE = "bot.lock"
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
 
-# ====== Функции работы с данными ======
-def load_data():
-    try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "rb") as f:
-                data = pickle.load(f)
-                data['viewed_ankets'] = defaultdict(set, data.get('viewed_ankets', {}))
-                data['last_post_times'] = data.get('last_post_times', {})
-                data['channel_posts'] = data.get('channel_posts', {})
-                return data
-    except Exception as e:
-        logger.error(f"Ошибка загрузки данных: {e}")
+# Инициализация данных
+data = {
+    'user_ankets': {},
+    'banned_users': set(),
+    'viewed_ankets': defaultdict(set),
+    'ankets_list': [],
+    'last_post_times': {},
+    'channel_posts': {}
+}
 
-    return {
-        'user_ankets': {},
-        'banned_users': set(),
-        'viewed_ankets': defaultdict(set),
-        'ankets_list': [],
-        'last_post_times': {},
-        'channel_posts': {}
-    }
+try:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "rb") as f:
+            loaded_data = pickle.load(f)
+            data['viewed_ankets'] = defaultdict(set, loaded_data.get('viewed_ankets', {}))
+            data.update(loaded_data)
+except Exception as e:
+    logger.error(f"Ошибка загрузки данных: {e}")
+
+user_ankets = data['user_ankets']
+banned_users = data['banned_users']
+viewed_ankets = data['viewed_ankets']
+ankets_list = data['ankets_list']
+last_post_times = data['last_post_times']
+channel_posts = data['channel_posts']
 
 def save_data():
     try:
-        data = {
+        data_to_save = {
             'user_ankets': user_ankets,
             'banned_users': banned_users,
             'viewed_ankets': dict(viewed_ankets),
@@ -128,93 +86,51 @@ def save_data():
             'channel_posts': channel_posts
         }
         with open(DATA_FILE, "wb") as f:
-            pickle.dump(data, f)
+            pickle.dump(data_to_save, f)
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
 
-# ====== Проверка дублирующего запуска ======
-def is_bot_already_running():
+# ====== Flask App ======
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    """Запускает Flask сервер"""
+    port = int(os.environ.get('PORT', 10000))
+    
+    # Настройка логгирования Flask
+    flask_log = logging.getLogger('werkzeug')
+    flask_log.setLevel(logging.WARNING)
+    
+    logger.info(f"🟢 Flask запускается на порту {port}")
+    
     try:
-        if os.environ.get('BOT_LOCK') == '1':
-            return True
-        os.environ['BOT_LOCK'] = '1'
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка проверки lock: {e}")
-        return False
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port, threads=1)
+    except ImportError:
+        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# ====== Обработка сигналов завершения ======
-def handle_exit(signum, frame):
-    logger.info("\n🛑 Получен сигнал завершения, сохраняем данные...")
-    save_data()
-    try:
-        os.unlink(LOCK_FILE)
-    except:
-        pass
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, handle_exit)
-signal.signal(signal.SIGTERM, handle_exit)
-
-# Инициализация данных
-data = load_data()
-user_ankets = data['user_ankets']
-banned_users = data['banned_users']
-viewed_ankets = data['viewed_ankets']
-ankets_list = data['ankets_list']
-last_post_times = data['last_post_times']
-channel_posts = data['channel_posts']
-
-# ====== Вспомогательные функции ======
+# ====== Telegram Bot Functions ======
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
-
-def log_action(action: str, user_id: int, details: str = ""):
-    with open("actions.log", "a", encoding='utf-8') as f:
-        f.write(f"{datetime.now()} | {action} | User {user_id} | {details}\n")
 
 async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = None):
     try:
         if update.message:
             await update.message.reply_text(text, reply_markup=reply_markup)
         elif update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(
-                text, reply_markup=reply_markup)
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
 
-async def publish_to_channel(user_id: int, url: str, comment: str,
-                           context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = await context.bot.get_chat(user_id)
-        username = f"@{user.username}" if user.username else f"ID:{user_id}"
-
-        message = (f"📌 Новая анкета от {username}:\n\n"
-                  f"{comment}\n\n"
-                  f"🔗 {url}\n\n"
-                  f"#анкета #знакомства")
-
-        sent_message = await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=message,
-            disable_web_page_preview=True
-        )
-        logger.info(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
-
-        channel_posts[user_id] = sent_message.message_id
-        save_data()
-        return True
-    except telegram.error.BadRequest as e:
-        logger.error(f"❌ Ошибка публикации (BadRequest): {str(e)}")
-        return False
-    except telegram.error.Unauthorized:
-        logger.error("❌ Бот не имеет доступа к каналу")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Неизвестная ошибка публикации: {str(e)}")
-        return False
-
-# ====== Основные обработчики ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
         return
@@ -645,84 +561,62 @@ async def handle_admin_commands(update: Update,
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     error = context.error
+    logger.error(f'⚠️ Ошибка: {error}')
+
+async def run_bot():
+    """Запускает Telegram бота"""
+    logger.info("=== Запуск Telegram бота ===")
     
-    if isinstance(error, telegram.error.Conflict):
-        logger.error("⚠️ Обнаружен конфликт - перезапускаю бота через 10 секунд")
-        if 'BOT_LOCK' in os.environ:
-            del os.environ['BOT_LOCK']
-        await asyncio.sleep(10)
-        os.execv(sys.executable, ['python'] + sys.argv)
-    elif isinstance(error, telegram.error.Unauthorized):
-        logger.error("❌ Ошибка авторизации - проверьте токен бота")
-    else:
-        logger.error(f'⚠️ Необработанная ошибка: {error}')
+    TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
+    application = Application.builder().token(TOKEN).build()
 
-# ====== Запуск бота ======
-async def main_async():
-    """Асинхронная основная функция запуска бота"""
-    if is_bot_already_running():
-        logger.error("⚠️ Бот уже запущен! Завершаюсь.")
-        time.sleep(3)
-        return
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("add", add_anket))
+    application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
+    application.add_handler(CommandHandler("delete", delete_anket))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("help_create", help_create))
+    application.add_handler(CommandHandler("donate", donate))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+        handle_message))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+        handle_admin_commands))
+    
+    application.add_error_handler(error_handler)
 
-    try:
-        os.environ['BOT_LOCK'] = '1'
-        logger.info("=== Начало запуска бота ===")
-        logger.info(f"Python-Telegram-Bot version: {telegram_version}")
+    await application.initialize()
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    await application.start()
+    logger.info("🟢 Telegram бот успешно запущен!")
+    
+    # Бесконечный цикл для поддержания работы бота
+    while True:
+        await asyncio.sleep(3600)  # Проверка каждые 60 минут
 
-        # Запускаем Flask в отдельном потоке
-        flask_thread = Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-
-        # Инициализация бота
-        TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
-        application = Application.builder().token(TOKEN).concurrent_updates(True).build()
-
-        # Регистрация обработчиков
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("add", add_anket))
-        application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
-        application.add_handler(CommandHandler("delete", delete_anket))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("help_create", help_create))
-        application.add_handler(CommandHandler("donate", donate))
-        application.add_handler(CommandHandler("admin", admin_panel))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
-            handle_message))
-        application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-            handle_admin_commands))
-        
-        application.add_error_handler(error_handler)
-
-        # Удаляем вебхук перед запуском polling
-        await application.bot.delete_webhook(drop_pending_updates=True)
-
-        logger.info("🟢 Бот успешно запущен!")
-        await application.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            stop_signals=[],
-            allowed_updates=Update.ALL_TYPES
-        )
-
-    except Exception as e:
-        logger.error(f"🔴 Критическая ошибка: {e}")
-        try:
-            if 'application' in locals():
-                await application.stop()
-        except:
-            pass
-    finally:
-        if 'BOT_LOCK' in os.environ:
-            del os.environ['BOT_LOCK']
-        save_data()
-        logger.info("🛑 Бот завершил работу")
+    await application.stop()
+    await application.shutdown()
 
 def main():
-    asyncio.run(main_async())
+    """Основная функция запуска"""
+    # Запускаем Flask в отдельном потоке
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Запускаем бота в основном потоке
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Получен сигнал завершения")
+    except Exception as e:
+        logger.error(f"🔴 Критическая ошибка: {e}")
+    finally:
+        save_data()
+        logger.info("🛑 Приложение завершило работу")
 
 if __name__ == '__main__':
     main()
