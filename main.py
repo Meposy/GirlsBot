@@ -33,10 +33,19 @@ def find_free_port():
         return s.getsockname()[1]
 
 def run_flask():
-    """Запускает Flask на свободном порту"""
-    port = find_free_port()
-    print(f"🟢 Flask запущен на порту {port}")
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    """Запускает Flask на свободном порту с обработкой ошибок"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            port = find_free_port()
+            print(f"🟢 Попытка {attempt+1}: Flask запускается на порту {port}")
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+            break
+        except OSError as e:
+            print(f"⚠️ Ошибка порта: {e}")
+            if attempt == max_retries - 1:
+                print("🔴 Не удалось запустить Flask после нескольких попыток")
+            time.sleep(1)
 
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
@@ -114,6 +123,38 @@ async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = 
                 text, reply_markup=reply_markup)
     except Exception as e:
         print(f"Ошибка отправки сообщения: {e}")
+
+async def publish_to_channel(user_id: int, url: str, comment: str,
+                           context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = await context.bot.get_chat(user_id)
+        username = f"@{user.username}" if user.username else f"ID:{user_id}"
+
+        message = (f"📌 Новая анкета от {username}:\n\n"
+                  f"{comment}\n\n"
+                  f"🔗 {url}\n\n"
+                  f"#анкета #знакомства")
+
+        sent_message = await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=message,
+            disable_web_page_preview=True
+        )
+        print(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
+
+        channel_posts[user_id] = sent_message.message_id
+        save_data()
+        return True
+
+    except telegram.error.BadRequest as e:
+        print(f"❌ Ошибка публикации (BadRequest): {str(e)}")
+        return False
+    except telegram.error.Unauthorized:
+        print("❌ Бот не имеет доступа к каналу")
+        return False
+    except Exception as e:
+        print(f"❌ Неизвестная ошибка публикации: {str(e)}")
+        return False
 
 # ====== Основные обработчики ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,6 +606,10 @@ async def handle_admin_commands(update: Update,
 
 # ====== Запуск бота ======
 def main():
+    if os.environ.get('RUNNING_FLAG'):
+    print("⚠️ Бот уже запущен! Прерывание.")
+    return
+os.environ['RUNNING_FLAG'] = '1'
     print("=== Начало запуска бота ===")
     print(f"Python-Telegram-Bot version: {telegram.__version__}")
     
@@ -588,6 +633,7 @@ def main():
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
             handle_admin_commands))
+        application.add_error_handler(error_handler)
 
         print("🟢 Бот успешно запущен!")
         application.run_polling(
@@ -607,3 +653,9 @@ if __name__ == '__main__':
     
     # Запускаем бота
     main()
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик всех ошибок"""
+    print(f'⚠️ Ошибка: {context.error}')
+    if isinstance(context.error, telegram.error.Conflict):
+        print("Обнаружен конфликт - возможно, запущен второй экземпляр бота")
