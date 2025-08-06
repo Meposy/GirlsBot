@@ -47,9 +47,17 @@ def home():
 def health():
     return "OK", 200
 
+def is_port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
 def run_flask():
     """Запускает Flask сервер с обработкой ошибок"""
     port = int(os.environ.get('PORT', 10000))
+    
+    if is_port_in_use(port):
+        logger.warning(f"Port {port} is already in use, skipping Flask")
+        return
     
     # Настройка логгирования Flask
     flask_log = logging.getLogger('werkzeug')
@@ -62,16 +70,15 @@ def run_flask():
         serve(app, 
               host="0.0.0.0", 
               port=port,
-              threads=1,  # Явно указываем 1 поток
+              threads=1,
               channel_timeout=60)
-        
     except ImportError:
         logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
         app.run(host='0.0.0.0', 
                 port=port, 
                 debug=False, 
                 use_reloader=False,
-                threaded=False)  # Отключаем многопоточность
+                threaded=False)
     except Exception as e:
         logger.error(f"🔴 Ошибка Flask: {e}")
 
@@ -94,7 +101,6 @@ def load_data():
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "rb") as f:
                 data = pickle.load(f)
-                # Инициализация всех необходимых полей
                 data['viewed_ankets'] = defaultdict(set, data.get('viewed_ankets', {}))
                 data['last_post_times'] = data.get('last_post_times', {})
                 data['channel_posts'] = data.get('channel_posts', {})
@@ -129,11 +135,8 @@ def save_data():
 # ====== Проверка дублирующего запуска ======
 def is_bot_already_running():
     try:
-        # Проверка через переменную окружения (более надежно в Render)
         if os.environ.get('BOT_LOCK') == '1':
             return True
-        
-        # Устанавливаем флаг запуска
         os.environ['BOT_LOCK'] = '1'
         return False
     except Exception as e:
@@ -201,7 +204,6 @@ async def publish_to_channel(user_id: int, url: str, comment: str,
         channel_posts[user_id] = sent_message.message_id
         save_data()
         return True
-
     except telegram.error.BadRequest as e:
         logger.error(f"❌ Ошибка публикации (BadRequest): {str(e)}")
         return False
@@ -646,7 +648,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     
     if isinstance(error, telegram.error.Conflict):
         logger.error("⚠️ Обнаружен конфликт - перезапускаю бота через 10 секунд")
-        # Сбрасываем флаг блокировки перед перезапуском
         if 'BOT_LOCK' in os.environ:
             del os.environ['BOT_LOCK']
         await asyncio.sleep(10)
@@ -657,17 +658,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f'⚠️ Необработанная ошибка: {error}')
 
 # ====== Запуск бота ======
-def main():
-    """Основная функция запуска бота"""
+async def main_async():
+    """Асинхронная основная функция запуска бота"""
     if is_bot_already_running():
         logger.error("⚠️ Бот уже запущен! Завершаюсь.")
-        time.sleep(3)  # Даем время для завершения предыдущего процесса
+        time.sleep(3)
         return
 
     try:
-        # Устанавливаем флаг запуска
         os.environ['BOT_LOCK'] = '1'
-        
         logger.info("=== Начало запуска бота ===")
         logger.info(f"Python-Telegram-Bot version: {telegram_version}")
 
@@ -699,13 +698,10 @@ def main():
         application.add_error_handler(error_handler)
 
         # Удаляем вебхук перед запуском polling
-        application.updater = None  # Отключаем встроенный updater
-        asyncio.get_event_loop().run_until_complete(
-            application.bot.delete_webhook(drop_pending_updates=True)
-        )
+        await application.bot.delete_webhook(drop_pending_updates=True)
 
         logger.info("🟢 Бот успешно запущен!")
-        application.run_polling(
+        await application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
             stop_signals=[],
@@ -714,25 +710,19 @@ def main():
 
     except Exception as e:
         logger.error(f"🔴 Критическая ошибка: {e}")
-        # Попытка graceful shutdown
         try:
             if 'application' in locals():
-                asyncio.get_event_loop().run_until_complete(
-                    application.stop()
-                )
+                await application.stop()
         except:
             pass
     finally:
-        # Сбрасываем флаг блокировки
         if 'BOT_LOCK' in os.environ:
             del os.environ['BOT_LOCK']
         save_data()
         logger.info("🛑 Бот завершил работу")
 
+def main():
+    asyncio.run(main_async())
+
 if __name__ == '__main__':
-    # Запускаем Flask в фоновом режиме
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Запускаем бота
     main()
