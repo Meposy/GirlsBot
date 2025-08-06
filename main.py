@@ -607,14 +607,14 @@ async def handle_admin_commands(update: Update,
 # ====== Запуск бота ======
 def main():
     if os.environ.get('RUNNING_FLAG'):
-    print("⚠️ Бот уже запущен! Прерывание.")
-    return
-os.environ['RUNNING_FLAG'] = '1'
-    print("=== Начало запуска бота ===")
+        print("⚠️ Бот уже запущен! Прерывание.")  # ← 4 пробела
+        return
+    
+    print("=== Начало запуска бота ===")  # ← Без лишнего отступа
     print(f"Python-Telegram-Bot version: {telegram.__version__}")
     
     try:
-        TOKEN = "7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w"
+        TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
         application = Application.builder().token(TOKEN).concurrent_updates(True).build()
 
         # Регистрация обработчиков
