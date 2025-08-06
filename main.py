@@ -48,9 +48,32 @@ def health():
     return "OK", 200
 
 def run_flask():
+    """Запускает Flask сервер с обработкой ошибок"""
     port = int(os.environ.get('PORT', 10000))
+    
+    # Настройка логгирования Flask
+    flask_log = logging.getLogger('werkzeug')
+    flask_log.setLevel(logging.WARNING)
+    
     logger.info(f"🟢 Flask запускается на порту {port}")
-    serve(app, host="0.0.0.0", port=port, threads=1)  # Явно указываем 1 поток
+    
+    try:
+        from waitress import serve
+        serve(app, 
+              host="0.0.0.0", 
+              port=port,
+              threads=1,  # Явно указываем 1 поток
+              channel_timeout=60)
+        
+    except ImportError:
+        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
+        app.run(host='0.0.0.0', 
+                port=port, 
+                debug=False, 
+                use_reloader=False,
+                threaded=False)  # Отключаем многопоточность
+    except Exception as e:
+        logger.error(f"🔴 Ошибка Flask: {e}")
 
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
@@ -635,16 +658,25 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ====== Запуск бота ======
 def main():
+    """Основная функция запуска бота"""
     if is_bot_already_running():
         logger.error("⚠️ Бот уже запущен! Завершаюсь.")
-        # Даем время другому экземпляру завершить работу
-        time.sleep(5)
+        time.sleep(3)  # Даем время для завершения предыдущего процесса
         return
 
-    logger.info("=== Начало запуска бота ===")
-    
     try:
-        TOKEN = os.getenv('TELEGRAM_TOKEN')
+        # Устанавливаем флаг запуска
+        os.environ['BOT_LOCK'] = '1'
+        
+        logger.info("=== Начало запуска бота ===")
+        logger.info(f"Python-Telegram-Bot version: {telegram_version}")
+
+        # Запускаем Flask в отдельном потоке
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+
+        # Инициализация бота
+        TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
         application = Application.builder().token(TOKEN).concurrent_updates(True).build()
 
         # Регистрация обработчиков
@@ -664,27 +696,38 @@ def main():
             filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
             handle_admin_commands))
         
-        # Обработчик ошибок должен быть только один
         application.add_error_handler(error_handler)
-        
+
+        # Удаляем вебхук перед запуском polling
+        application.updater = None  # Отключаем встроенный updater
+        asyncio.get_event_loop().run_until_complete(
+            application.bot.delete_webhook(drop_pending_updates=True)
+        )
+
         logger.info("🟢 Бот успешно запущен!")
-        
-        # Настройки для длительного ожидания
         application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
             stop_signals=[],
-            timeout=600,
             allowed_updates=Update.ALL_TYPES
         )
+
     except Exception as e:
-        logger.error(f"🔴 Ошибка: {e}")
-    finally:
-        save_data()
+        logger.error(f"🔴 Критическая ошибка: {e}")
+        # Попытка graceful shutdown
         try:
-            os.unlink(LOCK_FILE)
+            if 'application' in locals():
+                asyncio.get_event_loop().run_until_complete(
+                    application.stop()
+                )
         except:
             pass
+    finally:
+        # Сбрасываем флаг блокировки
+        if 'BOT_LOCK' in os.environ:
+            del os.environ['BOT_LOCK']
+        save_data()
+        logger.info("🛑 Бот завершил работу")
 
 if __name__ == '__main__':
     # Запускаем Flask в фоновом режиме
