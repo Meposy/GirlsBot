@@ -617,6 +617,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ====== Запуск бота ======
 def main():
+    try:
+    lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    lock_socket.bind('\0' + 'vlv_lp_bot_lock')  # Уникальный ключ
+except socket.error:
+    print("⚠️ Бот уже запущен! Завершаюсь.")
+    exit(1)
+
     if os.environ.get('RUNNING_FLAG'):
         print("⚠️ Бот уже запущен! Прерывание.")  # ← 4 пробела
         return
