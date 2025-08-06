@@ -3,6 +3,9 @@ import pickle
 import os
 import time
 import telegram
+import asyncio
+import sys
+from telegram import Update
 from datetime import datetime
 from collections import defaultdict
 from typing import Optional, Union, Any
@@ -628,13 +631,25 @@ def main():
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
                 handle_admin_commands))
+        # Обработчик ошибок
+        application.add_error_handler(error_handler)
 
         print("🟢 Бот успешно запущен!")
-        application.run_polling()
+        application.run_polling(drop_pending_updates=True)
     except Exception as e:
         print(f"🔴 Ошибка: {e}")
     finally:
         save_data()
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ошибок."""
+    if isinstance(context.error, telegram.error.Conflict):
+        print("⚠️ Обнаружен конфликт: уже запущен другой экземпляр бота")
+        # Можно попробовать перезапустить бота после паузы
+        await asyncio.sleep(5)
+        os.execv(sys.executable, ['python'] + sys.argv)
+    else:
+        print(f'⚠️ Ошибка при обработке обновления: {context.error}')
 
 
 if __name__ == '__main__':
