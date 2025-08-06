@@ -48,23 +48,9 @@ def health():
     return "OK", 200
 
 def run_flask():
-    """Запускает Flask с обработкой ошибок и автоматическим выбором порта"""
     port = int(os.environ.get('PORT', 10000))
-    
-    # Отключаем вывод логов Flask
-    flask_log = logging.getLogger('werkzeug')
-    flask_log.setLevel(logging.ERROR)
-    
     logger.info(f"🟢 Flask запускается на порту {port}")
-    
-    try:
-        # Пытаемся использовать waitress для production
-        from waitress import serve
-        serve(app, host="0.0.0.0", port=port)
-    except ImportError:
-        # Fallback на dev-сервер, если waitress не установлен
-        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    serve(app, host="0.0.0.0", port=port, threads=1)  # Явно указываем 1 поток
 
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
@@ -120,21 +106,15 @@ def save_data():
 # ====== Проверка дублирующего запуска ======
 def is_bot_already_running():
     try:
-        if os.path.exists(LOCK_FILE):
-            with open(LOCK_FILE, "r") as f:
-                pid = int(f.read())
-                try:
-                    os.kill(pid, 0)  # Проверяем, существует ли процесс
-                    return True
-                except OSError:
-                    os.unlink(LOCK_FILE)
+        # Проверка через переменную окружения (более надежно в Render)
+        if os.environ.get('BOT_LOCK') == '1':
+            return True
         
-        # Создаем lock-файл
-        with open(LOCK_FILE, "w") as f:
-            f.write(str(os.getpid()))
+        # Устанавливаем флаг запуска
+        os.environ['BOT_LOCK'] = '1'
         return False
     except Exception as e:
-        logger.error(f"Ошибка проверки lock-файла: {e}")
+        logger.error(f"Ошибка проверки lock: {e}")
         return False
 
 # ====== Обработка сигналов завершения ======
@@ -639,34 +619,32 @@ async def handle_admin_commands(update: Update,
             await update.message.reply_text("Неверный номер анкеты")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик всех ошибок бота"""
     error = context.error
     
     if isinstance(error, telegram.error.Conflict):
-        logger.error("⚠️ Обнаружен конфликт - возможно, запущен второй экземпляр бота")
-        # Попробуем перезапустить бота через некоторое время
+        logger.error("⚠️ Обнаружен конфликт - перезапускаю бота через 10 секунд")
+        # Сбрасываем флаг блокировки перед перезапуском
+        if 'BOT_LOCK' in os.environ:
+            del os.environ['BOT_LOCK']
         await asyncio.sleep(10)
         os.execv(sys.executable, ['python'] + sys.argv)
     elif isinstance(error, telegram.error.Unauthorized):
         logger.error("❌ Ошибка авторизации - проверьте токен бота")
-    elif isinstance(error, telegram.error.NetworkError):
-        logger.error("⚠️ Ошибка сети, попробуем переподключиться...")
-        await asyncio.sleep(5)
     else:
         logger.error(f'⚠️ Необработанная ошибка: {error}')
 
 # ====== Запуск бота ======
 def main():
-    os.environ['ENV'] = 'PRODUCTION'
     if is_bot_already_running():
         logger.error("⚠️ Бот уже запущен! Завершаюсь.")
+        # Даем время другому экземпляру завершить работу
+        time.sleep(5)
         return
 
     logger.info("=== Начало запуска бота ===")
-    logger.info(f"Python-Telegram-Bot version: {telegram_version}")
     
     try:
-        TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
+        TOKEN = os.getenv('TELEGRAM_TOKEN')
         application = Application.builder().token(TOKEN).concurrent_updates(True).build()
 
         # Регистрация обработчиков
