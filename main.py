@@ -3,9 +3,8 @@ import pickle
 import os
 import time
 import asyncio
-import socket
-import sys
 import signal
+import sys
 import logging
 from datetime import datetime
 from collections import defaultdict
@@ -22,8 +21,7 @@ from telegram.ext import (
 )
 from flask import Flask
 import telegram
-from telegram import __version__ as telegram_version 
-from telegram import error as telegram_error
+from telegram import __version__ as telegram_version
 
 # ====== Настройка логгирования ======
 logging.basicConfig(
@@ -44,40 +42,36 @@ BANNED_WORDS = ["тупая", "дура", "блять"]
 ADMIN_ID = 1340811422
 YOOMONEY_LINK = "https://yoomoney.ru/to/4100118961510419"
 ANKETS_PER_PAGE = 5
-LOCK_FILE = "bot.lock"
 
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
 
-# Инициализация данных
-data = {
-    'user_ankets': {},
-    'banned_users': set(),
-    'viewed_ankets': defaultdict(set),
-    'ankets_list': [],
-    'last_post_times': {},
-    'channel_posts': {}
-}
+# ====== Инициализация данных ======
+def load_data():
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "rb") as f:
+                data = pickle.load(f)
+                # Инициализация всех необходимых полей
+                data['viewed_ankets'] = defaultdict(set, data.get('viewed_ankets', {}))
+                data['last_post_times'] = data.get('last_post_times', {})
+                data['channel_posts'] = data.get('channel_posts', {})
+                return data
+    except Exception as e:
+        logger.error(f"Ошибка загрузки данных: {e}")
 
-try:
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "rb") as f:
-            loaded_data = pickle.load(f)
-            data['viewed_ankets'] = defaultdict(set, loaded_data.get('viewed_ankets', {}))
-            data.update(loaded_data)
-except Exception as e:
-    logger.error(f"Ошибка загрузки данных: {e}")
-
-user_ankets = data['user_ankets']
-banned_users = data['banned_users']
-viewed_ankets = data['viewed_ankets']
-ankets_list = data['ankets_list']
-last_post_times = data['last_post_times']
-channel_posts = data['channel_posts']
+    return {
+        'user_ankets': {},
+        'banned_users': set(),
+        'viewed_ankets': defaultdict(set),
+        'ankets_list': [],
+        'last_post_times': {},
+        'channel_posts': {}
+    }
 
 def save_data():
     try:
-        data_to_save = {
+        data = {
             'user_ankets': user_ankets,
             'banned_users': banned_users,
             'viewed_ankets': dict(viewed_ankets),
@@ -86,9 +80,18 @@ def save_data():
             'channel_posts': channel_posts
         }
         with open(DATA_FILE, "wb") as f:
-            pickle.dump(data_to_save, f)
+            pickle.dump(data, f)
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
+
+# Загрузка данных
+data = load_data()
+user_ankets = data['user_ankets']
+banned_users = data['banned_users']
+viewed_ankets = data['viewed_ankets']
+ankets_list = data['ankets_list']
+last_post_times = data['last_post_times']
+channel_posts = data['channel_posts']
 
 # ====== Flask App ======
 app = Flask(__name__)
@@ -102,8 +105,8 @@ def health():
     return "OK", 200
 
 def run_flask():
-    """Запускает Flask сервер"""
-    port = int(os.environ.get('PORT', 10000))
+    """Запускает Flask сервер с обработкой ошибок"""
+    port = int(os.environ.get('PORT', 8000))  # Изменен порт на 8000
     
     # Настройка логгирования Flask
     flask_log = logging.getLogger('werkzeug')
@@ -117,10 +120,16 @@ def run_flask():
     except ImportError:
         logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
         app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"🔴 Ошибка Flask: {e}")
 
 # ====== Telegram Bot Functions ======
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
+
+def log_action(action: str, user_id: int, details: str = ""):
+    with open("actions.log", "a", encoding='utf-8') as f:
+        f.write(f"{datetime.now()} | {action} | User {user_id} | {details}\n")
 
 async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = None):
     try:
@@ -131,6 +140,38 @@ async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = 
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
 
+async def publish_to_channel(user_id: int, url: str, comment: str,
+                           context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = await context.bot.get_chat(user_id)
+        username = f"@{user.username}" if user.username else f"ID:{user_id}"
+
+        message = (f"📌 Новая анкета от {username}:\n\n"
+                  f"{comment}\n\n"
+                  f"🔗 {url}\n\n"
+                  f"#анкета #знакомства")
+
+        sent_message = await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=message,
+            disable_web_page_preview=True
+        )
+        logger.info(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
+
+        channel_posts[user_id] = sent_message.message_id
+        save_data()
+        return True
+    except telegram.error.BadRequest as e:
+        logger.error(f"❌ Ошибка публикации (BadRequest): {str(e)}")
+        return False
+    except telegram.error.Unauthorized:
+        logger.error("❌ Бот не имеет доступа к каналу")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Неизвестная ошибка публикации: {str(e)}")
+        return False
+
+# ====== Обработчики команд ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
         return
@@ -563,6 +604,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     error = context.error
     logger.error(f'⚠️ Ошибка: {error}')
 
+# ====== Запуск бота ======
 async def run_bot():
     """Запускает Telegram бота"""
     logger.info("=== Запуск Telegram бота ===")
@@ -592,17 +634,29 @@ async def run_bot():
     await application.initialize()
     await application.bot.delete_webhook(drop_pending_updates=True)
     await application.start()
-    logger.info("🟢 Telegram бот успешно запущен!")
+    logger.info("🟢 Telegram бот успешно запущен (polling mode)!")
     
-    # Бесконечный цикл для поддержания работы бота
-    while True:
-        await asyncio.sleep(3600)  # Проверка каждые 60 минут
+    try:
+        # Бесконечный цикл для поддержания работы бота
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info("🛑 Получен сигнал завершения работы бота")
+    finally:
+        await application.stop()
+        await application.shutdown()
+        logger.info("🛑 Telegram бот завершил работу")
 
-    await application.stop()
-    await application.shutdown()
+def handle_signal(signum, frame):
+    logger.info(f"Получен сигнал {signum}, завершаем работу...")
+    sys.exit(0)
 
 def main():
     """Основная функция запуска"""
+    # Обработка сигналов
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
     # Запускаем Flask в отдельном потоке
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
