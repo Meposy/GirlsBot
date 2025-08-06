@@ -2,41 +2,43 @@ import re
 import pickle
 import os
 import time
-import telegram
 import asyncio
-import sys
-from telegram import Update
+import socket
 from datetime import datetime
 from collections import defaultdict
 from typing import Optional, Union, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (Application, CommandHandler, MessageHandler,
-                          CallbackQueryHandler, ContextTypes, filters)
-from flask import Flask
 from threading import Thread
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+from flask import Flask
 
-# ====== Для работы 24/7 ======
+# ====== Flask App ======
 app = Flask(__name__)
-
 
 @app.route('/')
 def home():
     return "Bot is alive!"
 
+def find_free_port():
+    """Находит свободный порт автоматически"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    """Запускает Flask на свободном порту"""
+    port = find_free_port()
+    print(f"🟢 Flask запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
-
-
-keep_alive()
-# =============================
-
-# Константы
+# ====== Константы ======
 DATA_FILE = "bot_data.pkl"
 CHANNEL_ID = "@VLV_LP"
 POST_COOLDOWN = 3600
@@ -48,29 +50,20 @@ ANKETS_PER_PAGE = 5
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
 
-
+# ====== Функции работы с данными ======
 def load_data():
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "rb") as f:
                 data = pickle.load(f)
-                # Инициализация всех необходимых полей, если их нет
-                if 'viewed_ankets' not in data:
-                    data['viewed_ankets'] = defaultdict(set)
-                else:
-                    data['viewed_ankets'] = defaultdict(set, data['viewed_ankets'])
-                
-                if 'last_post_times' not in data:
-                    data['last_post_times'] = {}
-                
-                if 'channel_posts' not in data:
-                    data['channel_posts'] = {}
-                
+                # Инициализация всех необходимых полей
+                data['viewed_ankets'] = defaultdict(set, data.get('viewed_ankets', {}))
+                data['last_post_times'] = data.get('last_post_times', {})
+                data['channel_posts'] = data.get('channel_posts', {})
                 return data
     except Exception as e:
         print(f"Ошибка загрузки данных: {e}")
 
-    # Возвращаем структуру по умолчанию, если файла нет или произошла ошибка
     return {
         'user_ankets': {},
         'banned_users': set(),
@@ -79,7 +72,6 @@ def load_data():
         'last_post_times': {},
         'channel_posts': {}
     }
-
 
 def save_data():
     try:
@@ -96,7 +88,6 @@ def save_data():
     except Exception as e:
         print(f"Ошибка сохранения данных: {e}")
 
-
 # Инициализация данных
 data = load_data()
 user_ankets = data['user_ankets']
@@ -104,21 +95,17 @@ banned_users = data['banned_users']
 viewed_ankets = data['viewed_ankets']
 ankets_list = data['ankets_list']
 last_post_times = data['last_post_times']
-channel_posts = data.get('channel_posts', {})
+channel_posts = data['channel_posts']
 
-
+# ====== Вспомогательные функции ======
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
-
 
 def log_action(action: str, user_id: int, details: str = ""):
     with open("actions.log", "a", encoding='utf-8') as f:
         f.write(f"{datetime.now()} | {action} | User {user_id} | {details}\n")
 
-
-async def safe_reply(update: Update,
-                     text: str,
-                     reply_markup: ReplyMarkupType = None):
+async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = None):
     try:
         if update.message:
             await update.message.reply_text(text, reply_markup=reply_markup)
@@ -128,31 +115,7 @@ async def safe_reply(update: Update,
     except Exception as e:
         print(f"Ошибка отправки сообщения: {e}")
 
-
-async def publish_to_channel(user_id: int, url: str, comment: str,
-                             context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = await context.bot.get_chat(user_id)
-        username = f"@{user.username}" if user.username else f"ID:{user_id}"
-
-        message = (f"📌 Новая анкета от {username}:\n\n"
-                   f"{comment}\n\n"
-                   f"🔗 {url}\n\n"
-                   f"#анкета #знакомства")
-
-        sent_message = await context.bot.send_message(
-            chat_id=CHANNEL_ID, text=message, disable_web_page_preview=True)
-        print(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
-
-        channel_posts[user_id] = sent_message.message_id
-        save_data()
-        return True
-
-    except Exception as e:
-        print(f"❌ Ошибка публикации в канал: {str(e)}")
-        return False
-
-
+# ====== Основные обработчики ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
         return
@@ -600,57 +563,47 @@ async def handle_admin_commands(update: Update,
             await update.message.reply_text("Неверный номер анкеты")
 
 
+# ====== Запуск бота ======
 def main():
-    print("=== Начало запуска бота ===")  # Проверка, что код вообще запускается
+    print("=== Начало запуска бота ===")
     print(f"Python-Telegram-Bot version: {telegram.__version__}")
+    
     try:
-        print("🟢 Инициализация бота...")
         TOKEN = "7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w"
-        application = Application.builder().token(TOKEN).build()
+        application = Application.builder().token(TOKEN).concurrent_updates(True).build()
 
-        # Основные команды
+        # Регистрация обработчиков
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("add", add_anket))
-        application.add_handler(
-            CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
+        application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
         application.add_handler(CommandHandler("delete", delete_anket))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("help_create", help_create))
         application.add_handler(CommandHandler("donate", donate))
         application.add_handler(CommandHandler("admin", admin_panel))
-
-        # Обработчики кнопок
         application.add_handler(CallbackQueryHandler(button_handler))
-
-        # Обработчики сообщений
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
-                handle_message))
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-                handle_admin_commands))
-        # Обработчик ошибок
-        application.add_error_handler(error_handler)
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+            handle_message))
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+            handle_admin_commands))
 
         print("🟢 Бот успешно запущен!")
-        application.run_polling(drop_pending_updates=True)
+        application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            stop_signals=[]
+        )
     except Exception as e:
         print(f"🔴 Ошибка: {e}")
     finally:
         save_data()
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик ошибок."""
-    if isinstance(context.error, telegram.error.Conflict):
-        print("⚠️ Обнаружен конфликт: уже запущен другой экземпляр бота")
-        # Можно попробовать перезапустить бота после паузы
-        await asyncio.sleep(5)
-        os.execv(sys.executable, ['python'] + sys.argv)
-    else:
-        print(f'⚠️ Ошибка при обработке обновления: {context.error}')
-
-
 if __name__ == '__main__':
+    # Запускаем Flask в фоновом режиме
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Запускаем бота
     main()
