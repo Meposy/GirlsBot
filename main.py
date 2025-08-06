@@ -20,6 +20,7 @@ from telegram.ext import (
 from flask import Flask
 import telegram  # Добавьте эту строку
 from telegram import __version__ as telegram_version 
+from telegram import error as telegram_error
 
 # ====== Flask App ======
 app = Flask(__name__)
@@ -605,6 +606,14 @@ async def handle_admin_commands(update: Update,
         except Exception:
             await update.message.reply_text("Неверный номер анкеты")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик всех ошибок бота"""
+    print(f'⚠️ Ошибка: {context.error}')
+    
+    if isinstance(context.error, telegram.error.Conflict):
+        print("Обнаружен конфликт - возможно, запущен второй экземпляр бота")
+    elif isinstance(context.error, telegram.error.Unauthorized):
+        print("Ошибка авторизации - проверьте токен бота")
 
 # ====== Запуск бота ======
 def main():
@@ -636,7 +645,9 @@ def main():
             filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
             handle_admin_commands))
         application.add_error_handler(error_handler)
-
+        
+        
+        application.add_error_handler(error_handler)  # Добавьте эту строку
         print("🟢 Бот успешно запущен!")
         application.run_polling(
             drop_pending_updates=True,
