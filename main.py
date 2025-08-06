@@ -4,6 +4,9 @@ import os
 import time
 import asyncio
 import socket
+import sys
+import signal
+import logging
 from datetime import datetime
 from collections import defaultdict
 from typing import Optional, Union, Any
@@ -18,9 +21,20 @@ from telegram.ext import (
     filters
 )
 from flask import Flask
-import telegram  # Добавьте эту строку
+import telegram
 from telegram import __version__ as telegram_version 
 from telegram import error as telegram_error
+
+# ====== Настройка логгирования ======
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ====== Flask App ======
 app = Flask(__name__)
@@ -29,26 +43,22 @@ app = Flask(__name__)
 def home():
     return "Bot is alive!"
 
-def find_free_port():
-    """Находит свободный порт автоматически"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
-
 def run_flask():
-    """Запускает Flask на свободном порту с обработкой ошибок"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            port = find_free_port()
-            print(f"🟢 Попытка {attempt+1}: Flask запускается на порту {port}")
-            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-            break
-        except OSError as e:
-            print(f"⚠️ Ошибка порта: {e}")
-            if attempt == max_retries - 1:
-                print("🔴 Не удалось запустить Flask после нескольких попыток")
-            time.sleep(1)
+    """Запускает Flask с обработкой ошибок и автоматическим выбором порта"""
+    port = int(os.environ.get('PORT', 5000))
+    
+    # Отключаем вывод логов Flask
+    flask_log = logging.getLogger('werkzeug')
+    flask_log.setLevel(logging.ERROR)
+    
+    logger.info(f"🟢 Flask запускается на порту {port}")
+    
+    # Используем waitress для production-режима
+    if os.environ.get('ENV') == 'PRODUCTION':
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port)
+    else:
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
@@ -58,6 +68,7 @@ BANNED_WORDS = ["тупая", "дура", "блять"]
 ADMIN_ID = 1340811422
 YOOMONEY_LINK = "https://yoomoney.ru/to/4100118961510419"
 ANKETS_PER_PAGE = 5
+LOCK_FILE = "bot.lock"
 
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
@@ -74,7 +85,7 @@ def load_data():
                 data['channel_posts'] = data.get('channel_posts', {})
                 return data
     except Exception as e:
-        print(f"Ошибка загрузки данных: {e}")
+        logger.error(f"Ошибка загрузки данных: {e}")
 
     return {
         'user_ankets': {},
@@ -98,7 +109,40 @@ def save_data():
         with open(DATA_FILE, "wb") as f:
             pickle.dump(data, f)
     except Exception as e:
-        print(f"Ошибка сохранения данных: {e}")
+        logger.error(f"Ошибка сохранения данных: {e}")
+
+# ====== Проверка дублирующего запуска ======
+def is_bot_already_running():
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE, "r") as f:
+                pid = int(f.read())
+                try:
+                    os.kill(pid, 0)  # Проверяем, существует ли процесс
+                    return True
+                except OSError:
+                    os.unlink(LOCK_FILE)
+        
+        # Создаем lock-файл
+        with open(LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка проверки lock-файла: {e}")
+        return False
+
+# ====== Обработка сигналов завершения ======
+def handle_exit(signum, frame):
+    logger.info("\n🛑 Получен сигнал завершения, сохраняем данные...")
+    save_data()
+    try:
+        os.unlink(LOCK_FILE)
+    except:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_exit)
+signal.signal(signal.SIGTERM, handle_exit)
 
 # Инициализация данных
 data = load_data()
@@ -125,7 +169,7 @@ async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = 
             await update.callback_query.message.reply_text(
                 text, reply_markup=reply_markup)
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        logger.error(f"Ошибка отправки сообщения: {e}")
 
 async def publish_to_channel(user_id: int, url: str, comment: str,
                            context: ContextTypes.DEFAULT_TYPE):
@@ -143,20 +187,20 @@ async def publish_to_channel(user_id: int, url: str, comment: str,
             text=message,
             disable_web_page_preview=True
         )
-        print(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
+        logger.info(f"Сообщение отправлено в канал! ID: {sent_message.message_id}")
 
         channel_posts[user_id] = sent_message.message_id
         save_data()
         return True
 
     except telegram.error.BadRequest as e:
-        print(f"❌ Ошибка публикации (BadRequest): {str(e)}")
+        logger.error(f"❌ Ошибка публикации (BadRequest): {str(e)}")
         return False
     except telegram.error.Unauthorized:
-        print("❌ Бот не имеет доступа к каналу")
+        logger.error("❌ Бот не имеет доступа к каналу")
         return False
     except Exception as e:
-        print(f"❌ Неизвестная ошибка публикации: {str(e)}")
+        logger.error(f"❌ Неизвестная ошибка публикации: {str(e)}")
         return False
 
 # ====== Основные обработчики ======
@@ -183,7 +227,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_reply(update, text)
 
-
 async def help_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📝 Как создать анкету:\n\n"
@@ -195,41 +238,37 @@ async def help_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "https://forms.google.com/ваша_форма Хочу познакомиться!")
     await safe_reply(update, help_text)
 
-
 async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = ("💖 Поддержать проект:\n\n"
             f"ЮMoney: {YOOMONEY_LINK}\n"
             "Спасибо за вашу поддержку!")
     await safe_reply(update, text)
 
-
 async def add_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("\n=== ОБРАБОТКА /add ===")
+    logger.info("\n=== ОБРАБОТКА /add ===")
     try:
         if not update.message or not update.effective_user:
-            print("❌ Нет сообщения или пользователя")
+            logger.error("❌ Нет сообщения или пользователя")
             return
 
         user_id = update.effective_user.id
-        print(f"User ID: {user_id}")
+        logger.info(f"User ID: {user_id}")
 
         if user_id in banned_users:
-            print("⛔ Пользователь заблокирован")
+            logger.info("⛔ Пользователь заблокирован")
             await safe_reply(update, "❌ Вы заблокированы")
             return
 
         if user_id in user_ankets:
             last_time = last_post_times.get(user_id, 0)
             if time.time() - last_time < POST_COOLDOWN:
-                remaining = int(
-                    (POST_COOLDOWN - (time.time() - last_time)) // 60)
-                print(f"⚠️ Лимит: {remaining} мин осталось")
+                remaining = int((POST_COOLDOWN - (time.time() - last_time)) // 60)
+                logger.info(f"⚠️ Лимит: {remaining} мин осталось")
                 await safe_reply(update, f"❌ Подождите {remaining} минут")
                 return
 
-            print("⚠️ Уже есть анкета")
-            await safe_reply(update,
-                             "❌ Сначала удалите текущую анкету (/delete)")
+            logger.info("⚠️ Уже есть анкета")
+            await safe_reply(update, "❌ Сначала удалите текущую анкету (/delete)")
             return
 
         if context.user_data is None:
@@ -237,7 +276,7 @@ async def add_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['awaiting_anket'] = True
         context.user_data['anket_user_id'] = user_id
-        print("✅ Ожидаем анкету (awaiting_anket=True)")
+        logger.info("✅ Ожидаем анкету (awaiting_anket=True)")
 
         await safe_reply(
             update,
@@ -246,15 +285,14 @@ async def add_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "https://forms.google.com/... Хочу познакомиться!")
 
     except Exception as e:
-        print(f"🔥 Ошибка в add_anket: {e}")
+        logger.error(f"🔥 Ошибка в add_anket: {e}")
         await safe_reply(update, "❌ Ошибка. Попробуйте позже.")
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("\n=== НОВОЕ СООБЩЕНИЕ ===")
+    logger.info("\n=== НОВОЕ СООБЩЕНИЕ ===")
     try:
         if not update.message or not update.effective_user:
-            print("❌ Нет сообщения или пользователя")
+            logger.error("❌ Нет сообщения или пользователя")
             return
 
         if context.user_data is None:
@@ -263,37 +301,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         text = update.message.text or ""
 
-        print(f"User ID: {user_id}")
-        print(f"Text: {text}")
-        print(f"Context user_data: {context.user_data}")
+        logger.info(f"User ID: {user_id}")
+        logger.info(f"Text: {text}")
+        logger.info(f"Context user_data: {context.user_data}")
 
         if (not context.user_data.get('awaiting_anket', False)
                 or context.user_data.get('anket_user_id') != user_id):
-            print("❌ Не ожидаем анкету")
+            logger.error("❌ Не ожидаем анкету")
             return
 
         if any(word in text.lower() for word in BANNED_WORDS):
-            print("❌ Найдены запрещенные слова")
-            await safe_reply(update,
-                             "❌ Ваше сообщение содержит запрещённые слова")
+            logger.error("❌ Найдены запрещенные слова")
+            await safe_reply(update, "❌ Ваше сообщение содержит запрещённые слова")
             log_action("BANNED_CONTENT", user_id, text)
             context.user_data['awaiting_anket'] = False
             return
 
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            print("❌ Не хватает частей (нужны url и комментарий)")
-            await safe_reply(update,
-                             "❌ Нужна ссылка И комментарий через пробел")
+            logger.error("❌ Не хватает частей (нужны url и комментарий)")
+            await safe_reply(update, "❌ Нужна ссылка И комментарий через пробел")
             return
 
         url, comment = parts
-        print(f"URL: {url}, Комментарий: {comment}")
+        logger.info(f"URL: {url}, Комментарий: {comment}")
 
         if not re.match(
                 r'^https:\/\/(docs\.google\.com|forms\.office\.com|forms\.gle)\/.+',
                 url):
-            print("❌ Невалидный URL")
+            logger.error("❌ Невалидный URL")
             await safe_reply(
                 update, "❌ Это не ссылка на Google Forms или Microsoft Forms")
             context.user_data['awaiting_anket'] = False
@@ -307,34 +343,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ankets_list.append((user_id, url, comment))
         last_post_times[user_id] = time.time()
         save_data()
-        print("✅ Анкета сохранена локально")
+        logger.info("✅ Анкета сохранена локально")
 
         if await publish_to_channel(user_id, url, comment, context):
-            print("✅ Анкета опубликована в канал")
+            logger.info("✅ Анкета опубликована в канал")
             await safe_reply(
                 update, "✅ Ваша анкета успешно добавлена и опубликована!")
         else:
-            print("❌ Ошибка публикации в канал")
+            logger.error("❌ Ошибка публикации в канал")
             await safe_reply(
                 update,
                 "✅ Анкета сохранена, но возникла проблема с публикацией. Админ уведомлен."
             )
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=
-                f"⚠️ Ошибка публикации анкеты от @{update.effective_user.username}"
+                text=f"⚠️ Ошибка публикации анкеты от @{update.effective_user.username}"
             )
 
     except Exception as e:
-        print(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
         if update.message:
             await safe_reply(
                 update,
                 "❌ Произошла непредвиденная ошибка. Админ уже уведомлен.")
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=
-            f"🚨 Ошибка в handle_message:\n{str(e)}\n\nUser: {user_id}\nText: {text}"
+            text=f"🚨 Ошибка в handle_message:\n{str(e)}\n\nUser: {user_id}\nText: {text}"
         )
 
     finally:
@@ -342,8 +376,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_anket'] = False
             if 'anket_user_id' in context.user_data:
                 del context.user_data['anket_user_id']
-            print("✅ Флаги ожидания сброшены")
-
+            logger.info("✅ Флаги ожидания сброшены")
 
 async def view_ankets(update: Update,
                       context: ContextTypes.DEFAULT_TYPE,
@@ -402,7 +435,6 @@ async def view_ankets(update: Update,
                      "📋 Выберите анкету для просмотра:",
                      reply_markup=reply_markup)
 
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.callback_query or not update.effective_user:
         return
@@ -429,7 +461,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             page = int(data[5:])
             await view_ankets(update, context, page)
         except (ValueError, IndexError) as e:
-            print(f"Error processing page data: {e}")
+            logger.error(f"Error processing page data: {e}")
             await safe_reply(update, "❌ Ошибка при обработке страницы")
 
     elif data.startswith("admin_"):
@@ -440,14 +472,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Введите ID пользователя для блокировки:")
             context.user_data['awaiting_ban'] = True
         elif data == "admin_delete":
-            await query.message.reply_text("Введите номер анкеты для удаления:"
-                                           )
+            await query.message.reply_text("Введите номер анкеты для удаления:")
             context.user_data['awaiting_delete'] = True
         elif data == "admin_unban":
             await query.message.reply_text(
                 "Введите ID пользователя для разблокировки:")
             context.user_data['awaiting_unban'] = True
-
 
 async def delete_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
@@ -464,7 +494,7 @@ async def delete_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                              message_id=channel_posts[user_id])
             del channel_posts[user_id]
         except Exception as e:
-            print(f"Ошибка удаления из канала: {e}")
+            logger.error(f"Ошибка удаления из канала: {e}")
 
     del user_ankets[user_id]
     ankets_list[:] = [a for a in ankets_list if a[0] != user_id]
@@ -473,7 +503,6 @@ async def delete_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data()
 
     await safe_reply(update, "✅ Ваша анкета успешно удалена")
-
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = ("📚 Справка по командам:\n\n"
@@ -487,7 +516,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  "Просто отправьте ссылку на анкету и комментарий, "
                  "чтобы добавить её в базу данных.")
     await safe_reply(update, help_text)
-
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin(update.effective_user.id):
@@ -512,7 +540,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Админ-панель:", reply_markup=reply_markup)
 
-
 async def admin_view_all_ankets(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -529,7 +556,6 @@ async def admin_view_all_ankets(update: Update,
 
     for i in range(0, len(text), 4000):
         await update.message.reply_text(text[i:i + 4000])
-
 
 async def handle_admin_commands(update: Update,
                                 context: ContextTypes.DEFAULT_TYPE):
@@ -608,29 +634,29 @@ async def handle_admin_commands(update: Update,
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик всех ошибок бота"""
-    print(f'⚠️ Ошибка: {context.error}')
+    error = context.error
     
-    if isinstance(context.error, telegram.error.Conflict):
-        print("Обнаружен конфликт - возможно, запущен второй экземпляр бота")
-    elif isinstance(context.error, telegram.error.Unauthorized):
-        print("Ошибка авторизации - проверьте токен бота")
+    if isinstance(error, telegram.error.Conflict):
+        logger.error("⚠️ Обнаружен конфликт - возможно, запущен второй экземпляр бота")
+        # Попробуем перезапустить бота через некоторое время
+        await asyncio.sleep(10)
+        os.execv(sys.executable, ['python'] + sys.argv)
+    elif isinstance(error, telegram.error.Unauthorized):
+        logger.error("❌ Ошибка авторизации - проверьте токен бота")
+    elif isinstance(error, telegram.error.NetworkError):
+        logger.error("⚠️ Ошибка сети, попробуем переподключиться...")
+        await asyncio.sleep(5)
+    else:
+        logger.error(f'⚠️ Необработанная ошибка: {error}')
 
 # ====== Запуск бота ======
 def main():
-    # ===== Проверка на дублирующий запуск =====
-    try:
-        lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        lock_socket.bind('\0' + 'vlv_lp_bot_lock')  # Уникальный ключ
-    except socket.error:
-        print("⚠️ Бот уже запущен! Завершаюсь.")
-        return  # Выходим, если бот уже запущен
-
-    if os.environ.get('RUNNING_FLAG'):
-        print("⚠️ Бот уже запущен! Прерывание.")  # ← 4 пробела
+    if is_bot_already_running():
+        logger.error("⚠️ Бот уже запущен! Завершаюсь.")
         return
-    
-    print("=== Начало запуска бота ===")  # ← Без лишнего отступа
-    print(f"Python-Telegram-Bot version: {telegram_version}")
+
+    logger.info("=== Начало запуска бота ===")
+    logger.info(f"Python-Telegram-Bot version: {telegram_version}")
     
     try:
         TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
@@ -652,20 +678,28 @@ def main():
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
             handle_admin_commands))
+        
+        # Обработчик ошибок должен быть только один
         application.add_error_handler(error_handler)
         
+        logger.info("🟢 Бот успешно запущен!")
         
-        application.add_error_handler(error_handler)  # Добавьте эту строку
-        print("🟢 Бот успешно запущен!")
+        # Настройки для длительного ожидания
         application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
-            stop_signals=[]
+            stop_signals=[],
+            timeout=600,
+            allowed_updates=Update.ALL_TYPES
         )
     except Exception as e:
-        print(f"🔴 Ошибка: {e}")
+        logger.error(f"🔴 Ошибка: {e}")
     finally:
         save_data()
+        try:
+            os.unlink(LOCK_FILE)
+        except:
+            pass
 
 if __name__ == '__main__':
     # Запускаем Flask в фоновом режиме
@@ -674,9 +708,3 @@ if __name__ == '__main__':
     
     # Запускаем бота
     main()
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик всех ошибок"""
-    print(f'⚠️ Ошибка: {context.error}')
-    if isinstance(context.error, telegram.error.Conflict):
-        print("Обнаружен конфликт - возможно, запущен второй экземпляр бота")
