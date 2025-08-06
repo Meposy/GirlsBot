@@ -18,6 +18,8 @@ from telegram.ext import (
     filters
 )
 from flask import Flask
+import telegram  # Добавьте эту строку
+from telegram import __version__ as telegram_version 
 
 # ====== Flask App ======
 app = Flask(__name__)
@@ -611,7 +613,7 @@ def main():
         return
     
     print("=== Начало запуска бота ===")  # ← Без лишнего отступа
-    print(f"Python-Telegram-Bot version: {telegram.__version__}")
+    print(f"Python-Telegram-Bot version: {telegram_version}")
     
     try:
         TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
