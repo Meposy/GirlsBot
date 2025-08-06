@@ -651,6 +651,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ====== Запуск бота ======
 def main():
+    os.environ['ENV'] = 'PRODUCTION'
     if is_bot_already_running():
         logger.error("⚠️ Бот уже запущен! Завершаюсь.")
         return
