@@ -51,11 +51,23 @@ def load_data():
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "rb") as f:
                 data = pickle.load(f)
-                data['viewed_ankets'] = defaultdict(set, data['viewed_ankets'])
+                # Инициализация всех необходимых полей, если их нет
+                if 'viewed_ankets' not in data:
+                    data['viewed_ankets'] = defaultdict(set)
+                else:
+                    data['viewed_ankets'] = defaultdict(set, data['viewed_ankets'])
+                
+                if 'last_post_times' not in data:
+                    data['last_post_times'] = {}
+                
+                if 'channel_posts' not in data:
+                    data['channel_posts'] = {}
+                
                 return data
     except Exception as e:
         print(f"Ошибка загрузки данных: {e}")
 
+    # Возвращаем структуру по умолчанию, если файла нет или произошла ошибка
     return {
         'user_ankets': {},
         'banned_users': set(),
