@@ -106,16 +106,24 @@ def health():
 def webhook():
     """Обработчик вебхука от Telegram"""
     if request.method == "POST":
-        json_data = request.get_json()
-        update = Update.de_json(json_data, application.bot)
-        
-        # Создаем новую задачу для обработки обновления
-        asyncio.run_coroutine_threadsafe(
-            application.process_update(update),
-            application.updater.bot.loop
-        )
-        
-        return jsonify({"status": "ok"})
+        try:
+            json_data = request.get_json()
+            logger.info(f"Получено обновление: {json_data}")
+            
+            update = Update.de_json(json_data, application.bot)
+            
+            # Создаем новый event loop если нужно
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Запускаем обработку
+            loop.run_until_complete(application.process_update(update))
+            
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            logger.error(f"Ошибка обработки вебхука: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
     return jsonify({"status": "method not allowed"}), 405
 
 def run_flask():
