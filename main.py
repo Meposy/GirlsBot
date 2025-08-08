@@ -106,7 +106,7 @@ def health():
 
 def run_flask():
     """Запускает Flask сервер с обработкой ошибок"""
-    port = int(os.environ.get('PORT', 10000)))  # Изменен порт на 8000
+    port = int(os.environ.get('PORT', 10000))  # Изменен порт на 8000
     
     # Настройка логгирования Flask
     flask_log = logging.getLogger('werkzeug')
