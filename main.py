@@ -19,7 +19,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import telegram
 from telegram import __version__ as telegram_version
 
@@ -43,6 +43,7 @@ ADMIN_ID = 1340811422
 YOOMONEY_LINK = "https://yoomoney.ru/to/4100118961510419"
 ANKETS_PER_PAGE = 5
 TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
+WEBHOOK_URL = f"https://girlsbot.onrender.com/{TOKEN}"
 
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
@@ -52,15 +53,10 @@ def load_data():
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "rb") as f:
-                data = pickle.load(f)
-                # Инициализация всех необходимых полей
-                data['viewed_ankets'] = defaultdict(set, data.get('viewed_ankets', {}))
-                data['last_post_times'] = data.get('last_post_times', {})
-                data['channel_posts'] = data.get('channel_posts', {})
-                return data
+                return pickle.load(f)
     except Exception as e:
         logger.error(f"Ошибка загрузки данных: {e}")
-
+    
     return {
         'user_ankets': {},
         'banned_users': set(),
@@ -72,16 +68,15 @@ def load_data():
 
 def save_data():
     try:
-        data = {
-            'user_ankets': user_ankets,
-            'banned_users': banned_users,
-            'viewed_ankets': dict(viewed_ankets),
-            'ankets_list': ankets_list,
-            'last_post_times': last_post_times,
-            'channel_posts': channel_posts
-        }
         with open(DATA_FILE, "wb") as f:
-            pickle.dump(data, f)
+            pickle.dump({
+                'user_ankets': user_ankets,
+                'banned_users': banned_users,
+                'viewed_ankets': dict(viewed_ankets),
+                'ankets_list': ankets_list,
+                'last_post_times': last_post_times,
+                'channel_posts': channel_posts
+            }, f)
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
 
@@ -94,53 +89,46 @@ ankets_list = data['ankets_list']
 last_post_times = data['last_post_times']
 channel_posts = data['channel_posts']
 
-# ====== Flask App ======
+# ====== Инициализация приложения ======
 app = Flask(__name__)
+application = Application.builder().token(TOKEN).build()
 
+# ====== Flask маршруты ======
 @app.route('/')
 def home():
     return "Bot is alive!"
 
 @app.route('/health')
 def health():
-    return "OK", 200
+    return jsonify({"status": "ok"})
 
 @app.route(f'/{TOKEN}', methods=['POST'])
-async def webhook():
+def webhook():
     """Обработчик вебхука от Telegram"""
     if request.method == "POST":
-        json_str = await request.get_json()
-        update = Update.de_json(json_str, application.bot)
-        await application.process_update(update)
-        return "OK", 200
-    return "Method not allowed", 405
+        json_data = request.get_json()
+        update = Update.de_json(json_data, application.bot)
+        
+        # Создаем новую задачу для обработки обновления
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            application.updater.bot.loop
+        )
+        
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "method not allowed"}), 405
 
 def run_flask():
-    """Запускает Flask сервер с обработкой ошибок"""
+    """Запускает Flask сервер"""
     port = int(os.environ.get('PORT', 10000))
-    
-    # Настройка логгирования Flask
-    flask_log = logging.getLogger('werkzeug')
-    flask_log.setLevel(logging.WARNING)
-    
     logger.info(f"🟢 Flask запускается на порту {port}")
     
-    try:
-        from waitress import serve
-        serve(app, host="0.0.0.0", port=port, threads=1)
-    except ImportError:
-        logger.warning("⚠️ Waitress не установлен, используем dev-сервер")
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-    except Exception as e:
-        logger.error(f"🔴 Ошибка Flask: {e}")
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=port)
 
 # ====== Telegram Bot Functions ======
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
-
-def log_action(action: str, user_id: int, details: str = ""):
-    with open("actions.log", "a", encoding='utf-8') as f:
-        f.write(f"{datetime.now()} | {action} | User {user_id} | {details}\n")
 
 async def safe_reply(update: Update, text: str, reply_markup: ReplyMarkupType = None):
     try:
@@ -618,56 +606,53 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # ====== Инициализация бота ======
 application = Application.builder().token(TOKEN).build()
 
-# Регистрация обработчиков
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("add", add_anket))
-application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
-application.add_handler(CommandHandler("delete", delete_anket))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("help_create", help_create))
-application.add_handler(CommandHandler("donate", donate))
-application.add_handler(CommandHandler("admin", admin_panel))
-application.add_handler(CallbackQueryHandler(button_handler))
-application.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
-    handle_message))
-application.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-    handle_admin_commands))
-application.add_error_handler(error_handler)
+def register_handlers():
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("add", add_anket))
+    application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
+    application.add_handler(CommandHandler("delete", delete_anket))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("help_create", help_create))
+    application.add_handler(CommandHandler("donate", donate))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+        handle_message))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+        handle_admin_commands))
+    application.add_error_handler(error_handler)
 
 # ====== Запуск приложения ======
-def handle_signal(signum, frame):
-    logger.info(f"Получен сигнал {signum}, завершаем работу...")
-    sys.exit(0)
+async def setup_webhook():
+    """Устанавливает вебхук"""
+    await application.bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES
+    )
+    logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
 
 def main():
     """Основная функция запуска"""
-    # Обработка сигналов
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
+    # Регистрируем обработчики
+    register_handlers()
+    
     # Запускаем Flask в отдельном потоке
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
-    # Инициализация бота
+    
+    # Устанавливаем вебхук
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_webhook())
     
+    # Бесконечный цикл
     try:
-        # Установка вебхука
-        WEBHOOK_URL = f"https://girlsbot.onrender.com/{TOKEN}"
-        loop.run_until_complete(application.bot.set_webhook(WEBHOOK_URL))
-        logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
-        
-        # Бесконечный цикл
         while True:
-            time.sleep(3600)
+            time.sleep(10)
     except KeyboardInterrupt:
         logger.info("🛑 Получен сигнал завершения")
-    except Exception as e:
-        logger.error(f"🔴 Критическая ошибка: {e}")
     finally:
         save_data()
         logger.info("🛑 Приложение завершило работу")
