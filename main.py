@@ -19,7 +19,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from flask import Flask
+from flask import Flask, request
 import telegram
 from telegram import __version__ as telegram_version
 
@@ -42,6 +42,7 @@ BANNED_WORDS = ["тупая", "дура", "блять"]
 ADMIN_ID = 1340811422
 YOOMONEY_LINK = "https://yoomoney.ru/to/4100118961510419"
 ANKETS_PER_PAGE = 5
+TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
 
 # Тип для reply_markup
 ReplyMarkupType = Optional[Union[InlineKeyboardMarkup, Any]]
@@ -104,9 +105,19 @@ def home():
 def health():
     return "OK", 200
 
+@app.route(f'/{TOKEN}', methods=['POST'])
+async def webhook():
+    """Обработчик вебхука от Telegram"""
+    if request.method == "POST":
+        json_str = await request.get_json()
+        update = Update.de_json(json_str, application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    return "Method not allowed", 405
+
 def run_flask():
     """Запускает Flask сервер с обработкой ошибок"""
-    port = int(os.environ.get('PORT', 10000))  # Изменен порт на 8000
+    port = int(os.environ.get('PORT', 10000))
     
     # Настройка логгирования Flask
     flask_log = logging.getLogger('werkzeug')
@@ -604,49 +615,28 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     error = context.error
     logger.error(f'⚠️ Ошибка: {error}')
 
-# ====== Запуск бота ======
-async def run_bot():
-    """Запускает Telegram бота"""
-    logger.info("=== Запуск Telegram бота ===")
-    
-    TOKEN = os.getenv('TELEGRAM_TOKEN', '7820852763:AAFdFqpQmNxd5m754fuOPnDGj5MNJs5Lw4w')
-    application = Application.builder().token(TOKEN).build()
+# ====== Инициализация бота ======
+application = Application.builder().token(TOKEN).build()
 
-    # Регистрация обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("add", add_anket))
-    application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
-    application.add_handler(CommandHandler("delete", delete_anket))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("help_create", help_create))
-    application.add_handler(CommandHandler("donate", donate))
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
-        handle_message))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-        handle_admin_commands))
-    
-    application.add_error_handler(error_handler)
+# Регистрация обработчиков
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("add", add_anket))
+application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
+application.add_handler(CommandHandler("delete", delete_anket))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("help_create", help_create))
+application.add_handler(CommandHandler("donate", donate))
+application.add_handler(CommandHandler("admin", admin_panel))
+application.add_handler(CallbackQueryHandler(button_handler))
+application.add_handler(MessageHandler(
+    filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
+    handle_message))
+application.add_handler(MessageHandler(
+    filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
+    handle_admin_commands))
+application.add_error_handler(error_handler)
 
-    await application.initialize()
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    await application.start()
-    logger.info("🟢 Telegram бот успешно запущен (polling mode)!")
-    
-    try:
-        # Бесконечный цикл для поддержания работы бота
-        while True:
-            await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        logger.info("🛑 Получен сигнал завершения работы бота")
-    finally:
-        await application.stop()
-        await application.shutdown()
-        logger.info("🛑 Telegram бот завершил работу")
-
+# ====== Запуск приложения ======
 def handle_signal(signum, frame):
     logger.info(f"Получен сигнал {signum}, завершаем работу...")
     sys.exit(0)
@@ -661,9 +651,19 @@ def main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Запускаем бота в основном потоке
+    # Инициализация бота
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     try:
-        asyncio.run(run_bot())
+        # Установка вебхука
+        WEBHOOK_URL = f"https://girlsbot.onrender.com/{TOKEN}"
+        loop.run_until_complete(application.bot.set_webhook(WEBHOOK_URL))
+        logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
+        
+        # Бесконечный цикл
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("🛑 Получен сигнал завершения")
     except Exception as e:
