@@ -1,5 +1,5 @@
 python-telegram-bot==20.3
-flask==2.3.2
+flask[async]==2.3.2
 waitress==2.1.2
 python-dotenv==1.0.0
 httpx==0.24.1
