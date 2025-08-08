@@ -89,11 +89,9 @@ ankets_list = data['ankets_list']
 last_post_times = data['last_post_times']
 channel_posts = data['channel_posts']
 
-# ====== Инициализация приложения ======
+# ====== Инициализация Flask ======
 app = Flask(__name__)
-application = Application.builder().token(TOKEN).build()
 
-# ====== Flask маршруты ======
 @app.route('/')
 def home():
     return "Bot is alive!"
@@ -101,38 +99,6 @@ def home():
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
-
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    """Обработчик вебхука от Telegram"""
-    if request.method == "POST":
-        try:
-            json_data = request.get_json()
-            logger.info(f"Получено обновление: {json_data}")
-            
-            update = Update.de_json(json_data, application.bot)
-            
-            # Создаем новый event loop если нужно
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            # Запускаем обработку
-            loop.run_until_complete(application.process_update(update))
-            
-            return jsonify({"status": "ok"}), 200
-        except Exception as e:
-            logger.error(f"Ошибка обработки вебхука: {e}")
-            return jsonify({"status": "error", "message": str(e)}), 500
-    
-    return jsonify({"status": "method not allowed"}), 405
-
-def run_flask():
-    """Запускает Flask сервер"""
-    port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🟢 Flask запускается на порту {port}")
-    
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=port)
 
 # ====== Telegram Bot Functions ======
 def is_admin(user_id: int) -> bool:
@@ -180,6 +146,7 @@ async def publish_to_channel(user_id: int, url: str, comment: str,
 
 # ====== Обработчики команд ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Обработка команды /start от {update.effective_user.id}")
     if not update.effective_user:
         return
 
@@ -612,9 +579,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f'⚠️ Ошибка: {error}')
 
 # ====== Инициализация бота ======
-application = Application.builder().token(TOKEN).build()
+def create_application():
+    application = Application.builder().token(TOKEN).build()
+    register_handlers(application)
+    return application
 
-def register_handlers():
+def register_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("add", add_anket))
     application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
@@ -632,36 +602,71 @@ def register_handlers():
         handle_admin_commands))
     application.add_error_handler(error_handler)
 
-# ====== Запуск приложения ======
-async def setup_webhook():
-    """Устанавливает вебхук"""
-    await application.bot.set_webhook(
-        url=WEBHOOK_URL,
-        allowed_updates=Update.ALL_TYPES
-    )
-    logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
+# ====== Обработчик вебхука ======
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Обработчик вебхука от Telegram"""
+    if request.method == "POST":
+        try:
+            json_data = request.get_json()
+            logger.info(f"Получено обновление: {json_data}")
+            
+            # Создаем и инициализируем приложение
+            app = create_application()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Инициализация
+            loop.run_until_complete(app.initialize())
+            
+            # Обработка обновления
+            update = Update.de_json(json_data, app.bot)
+            loop.run_until_complete(app.process_update(update))
+            
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            logger.error(f"Ошибка обработки вебхука: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    
+    return jsonify({"status": "method not allowed"}), 405
 
+# ====== Запуск сервера ======
+def run_flask():
+    """Запускает Flask сервер"""
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🟢 Flask запускается на порту {port}")
+    
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=port)
+
+# ====== Основная функция ======
 def main():
     """Основная функция запуска"""
-    # Регистрируем обработчики
-    register_handlers()
-    
-    # Запускаем Flask в отдельном потоке
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Устанавливаем вебхук
+    # Установка вебхука
+    application = create_application()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(setup_webhook())
     
-    # Бесконечный цикл
     try:
+        loop.run_until_complete(application.initialize())
+        loop.run_until_complete(application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        ))
+        logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
+        
+        # Запуск Flask
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Бесконечный цикл
         while True:
             time.sleep(10)
-    except KeyboardInterrupt:
-        logger.info("🛑 Получен сигнал завершения")
+    except Exception as e:
+        logger.error(f"Ошибка запуска: {e}")
     finally:
+        loop.run_until_complete(application.shutdown())
         save_data()
         logger.info("🛑 Приложение завершило работу")
 
