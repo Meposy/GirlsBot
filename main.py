@@ -198,7 +198,7 @@ async def add_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_ankets:
         last_time = last_post_times.get(user_id, 0)
         if time.time() - last_time < POST_COOLDOWN:
-            remaining = int((POST_COOLDOWN - (time.time() - last_time)) // 60
+            remaining = int((POST_COOLDOWN - (time.time() - last_time)) // 60)
             await safe_reply(update, f"❌ Подождите {remaining} минут")
             return
 
