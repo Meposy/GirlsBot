@@ -3,8 +3,6 @@ import pickle
 import os
 import time
 import asyncio
-import signal
-import sys
 import logging
 from datetime import datetime
 from collections import defaultdict
@@ -37,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ====== Константы ======
 DATA_FILE = "bot_data.pkl"
 CHANNEL_ID = "@VLV_LP"
-POST_COOLDOWN = 3600
+POST_COOLDOWN = 3600  # 1 час
 BANNED_WORDS = ["тупая", "дура", "блять"]
 ADMIN_ID = 1340811422
 YOOMONEY_LINK = "https://yoomoney.ru/to/4100118961510419"
@@ -144,9 +142,11 @@ async def publish_to_channel(user_id: int, url: str, comment: str,
         logger.error(f"❌ Неизвестная ошибка публикации: {str(e)}")
         return False
 
+def log_action(action: str, user_id: int, details: str = ""):
+    logger.info(f"Action: {action}, User: {user_id}, Details: {details}")
+
 # ====== Обработчики команд ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Обработка команды /start от {update.effective_user.id}")
     if not update.effective_user:
         return
 
@@ -187,142 +187,100 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, text)
 
 async def add_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("\n=== ОБРАБОТКА /add ===")
-    try:
-        if not update.message or not update.effective_user:
-            logger.error("❌ Нет сообщения или пользователя")
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    if user_id in banned_users:
+        await safe_reply(update, "❌ Вы заблокированы")
+        return
+
+    if user_id in user_ankets:
+        last_time = last_post_times.get(user_id, 0)
+        if time.time() - last_time < POST_COOLDOWN:
+            remaining = int((POST_COOLDOWN - (time.time() - last_time)) // 60
+            await safe_reply(update, f"❌ Подождите {remaining} минут")
             return
 
-        user_id = update.effective_user.id
-        logger.info(f"User ID: {user_id}")
+        await safe_reply(update, "❌ Сначала удалите текущую анкету (/delete)")
+        return
 
-        if user_id in banned_users:
-            logger.info("⛔ Пользователь заблокирован")
-            await safe_reply(update, "❌ Вы заблокированы")
-            return
+    if context.user_data is None:
+        context.user_data = {}
 
-        if user_id in user_ankets:
-            last_time = last_post_times.get(user_id, 0)
-            if time.time() - last_time < POST_COOLDOWN:
-                remaining = int((POST_COOLDOWN - (time.time() - last_time)) // 60)
-                logger.info(f"⚠️ Лимит: {remaining} мин осталось")
-                await safe_reply(update, f"❌ Подождите {remaining} минут")
-                return
+    context.user_data['awaiting_anket'] = True
+    context.user_data['anket_user_id'] = user_id
 
-            logger.info("⚠️ Уже есть анкета")
-            await safe_reply(update, "❌ Сначала удалите текущую анкету (/delete)")
-            return
-
-        if context.user_data is None:
-            context.user_data = {}
-
-        context.user_data['awaiting_anket'] = True
-        context.user_data['anket_user_id'] = user_id
-        logger.info("✅ Ожидаем анкету (awaiting_anket=True)")
-
-        await safe_reply(
-            update,
-            "📝 Отправьте ссылку на Google Forms и комментарий через пробел:\n"
-            "Пример:\n"
-            "https://forms.google.com/... Хочу познакомиться!")
-
-    except Exception as e:
-        logger.error(f"🔥 Ошибка в add_anket: {e}")
-        await safe_reply(update, "❌ Ошибка. Попробуйте позже.")
+    await safe_reply(
+        update,
+        "📝 Отправьте ссылку на Google Forms и комментарий через пробел:\n"
+        "Пример:\n"
+        "https://forms.google.com/... Хочу познакомиться!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info("\n=== НОВОЕ СООБЩЕНИЕ ===")
-    try:
-        if not update.message or not update.effective_user:
-            logger.error("❌ Нет сообщения или пользователя")
-            return
+    if not update.effective_user or not update.message:
+        return
 
-        if context.user_data is None:
-            context.user_data = {}
+    if context.user_data is None:
+        context.user_data = {}
 
-        user_id = update.effective_user.id
-        text = update.message.text or ""
+    user_id = update.effective_user.id
+    text = update.message.text or ""
 
-        logger.info(f"User ID: {user_id}")
-        logger.info(f"Text: {text}")
-        logger.info(f"Context user_data: {context.user_data}")
+    if not context.user_data.get('awaiting_anket', False) or context.user_data.get('anket_user_id') != user_id:
+        return
 
-        if (not context.user_data.get('awaiting_anket', False)
-                or context.user_data.get('anket_user_id') != user_id):
-            logger.error("❌ Не ожидаем анкету")
-            return
+    if any(word in text.lower() for word in BANNED_WORDS):
+        await safe_reply(update, "❌ Ваше сообщение содержит запрещённые слова")
+        log_action("BANNED_CONTENT", user_id, text)
+        context.user_data['awaiting_anket'] = False
+        return
 
-        if any(word in text.lower() for word in BANNED_WORDS):
-            logger.error("❌ Найдены запрещенные слова")
-            await safe_reply(update, "❌ Ваше сообщение содержит запрещённые слова")
-            log_action("BANNED_CONTENT", user_id, text)
-            context.user_data['awaiting_anket'] = False
-            return
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        await safe_reply(update, "❌ Нужна ссылка И комментарий через пробел")
+        context.user_data['awaiting_anket'] = False
+        return
 
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            logger.error("❌ Не хватает частей (нужны url и комментарий)")
-            await safe_reply(update, "❌ Нужна ссылка И комментарий через пробел")
-            return
+    url, comment = parts
 
-        url, comment = parts
-        logger.info(f"URL: {url}, Комментарий: {comment}")
+    if not re.match(
+            r'^https:\/\/(docs\.google\.com|forms\.office\.com|forms\.gle)\/.+',
+            url):
+        await safe_reply(
+            update, "❌ Это не ссылка на Google Forms или Microsoft Forms")
+        context.user_data['awaiting_anket'] = False
+        return
 
-        if not re.match(
-                r'^https:\/\/(docs\.google\.com|forms\.office\.com|forms\.gle)\/.+',
-                url):
-            logger.error("❌ Невалидный URL")
-            await safe_reply(
-                update, "❌ Это не ссылка на Google Forms или Microsoft Forms")
-            context.user_data['awaiting_anket'] = False
-            return
+    user_ankets[user_id] = {
+        'url': url,
+        'comment': comment,
+        'time': time.time()
+    }
+    ankets_list.append((user_id, url, comment))
+    last_post_times[user_id] = time.time()
+    save_data()
 
-        user_ankets[user_id] = {
-            'url': url,
-            'comment': comment,
-            'time': time.time()
-        }
-        ankets_list.append((user_id, url, comment))
-        last_post_times[user_id] = time.time()
-        save_data()
-        logger.info("✅ Анкета сохранена локально")
-
-        if await publish_to_channel(user_id, url, comment, context):
-            logger.info("✅ Анкета опубликована в канал")
-            await safe_reply(
-                update, "✅ Ваша анкета успешно добавлена и опубликована!")
-        else:
-            logger.error("❌ Ошибка публикации в канал")
-            await safe_reply(
-                update,
-                "✅ Анкета сохранена, но возникла проблема с публикацией. Админ уведомлен."
-            )
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"⚠️ Ошибка публикации анкеты от @{update.effective_user.username}"
-            )
-
-    except Exception as e:
-        logger.error(f"🔥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
-        if update.message:
-            await safe_reply(
-                update,
-                "❌ Произошла непредвиденная ошибка. Админ уже уведомлен.")
+    if await publish_to_channel(user_id, url, comment, context):
+        await safe_reply(
+            update, "✅ Ваша анкета успешно добавлена и опубликована!")
+    else:
+        await safe_reply(
+            update,
+            "✅ Анкета сохранена, но возникла проблема с публикацией. Админ уведомлен."
+        )
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🚨 Ошибка в handle_message:\n{str(e)}\n\nUser: {user_id}\nText: {text}"
+            text=f"⚠️ Ошибка публикации анкеты от @{update.effective_user.username}"
         )
 
-    finally:
-        if context.user_data is not None:
-            context.user_data['awaiting_anket'] = False
-            if 'anket_user_id' in context.user_data:
-                del context.user_data['anket_user_id']
-            logger.info("✅ Флаги ожидания сброшены")
+    context.user_data['awaiting_anket'] = False
+    if 'anket_user_id' in context.user_data:
+        del context.user_data['anket_user_id']
 
 async def view_ankets(update: Update,
-                      context: ContextTypes.DEFAULT_TYPE,
-                      page: int = 0):
+                     context: ContextTypes.DEFAULT_TYPE,
+                     page: int = 0):
     if not update.effective_user:
         return
 
@@ -335,7 +293,7 @@ async def view_ankets(update: Update,
         keyboard = []
         for idx, (_, url, comment) in enumerate(
                 ankets_list[page * ANKETS_PER_PAGE:(page + 1) *
-                            ANKETS_PER_PAGE], 1):
+                          ANKETS_PER_PAGE], 1):
             btn_text = f"Анкета {idx}: {comment[:30]}..."
             keyboard.append([
                 InlineKeyboardButton(btn_text, callback_data=f"view_{idx-1}")
@@ -348,8 +306,8 @@ async def view_ankets(update: Update,
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await safe_reply(update,
-                         "📋 Все анкеты (админ-режим):",
-                         reply_markup=reply_markup)
+                        "📋 Все анкеты (админ-режим):",
+                        reply_markup=reply_markup)
         return
 
     unseen = [
@@ -374,52 +332,58 @@ async def view_ankets(update: Update,
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     await safe_reply(update,
-                     "📋 Выберите анкету для просмотра:",
-                     reply_markup=reply_markup)
+                    "📋 Выберите анкету для просмотра:",
+                    reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.callback_query or not update.effective_user:
-        return
-
     query = update.callback_query
+    if not query:
+        return
+        
     await query.answer()
-    user_id = update.effective_user.id
-    data = query.data
+    
+    if not query.message:
+        return
+        
+    try:
+        if query.data.startswith("view_"):
+            idx = int(query.data[5:])
+            if 0 <= idx < len(ankets_list):
+                _, url, comment = ankets_list[idx]
+                if not is_admin(query.from_user.id):
+                    viewed_ankets[query.from_user.id].add(idx)
+                    save_data()
+                await query.edit_message_text(
+                    f"🔗 Ссылка: {url}\n📝 Комментарий: {comment}\n\n"
+                    "Чтобы вернуться, используйте /view")
 
-    if data.startswith("view_"):
-        idx = int(data[5:])
-        _, url, comment = ankets_list[idx]
+        elif query.data.startswith("page_"):
+            try:
+                page = int(query.data[5:])
+                await view_ankets(update, context, page)
+            except (ValueError, IndexError) as e:
+                logger.error(f"Error processing page data: {e}")
+                await query.message.reply_text("❌ Ошибка при обработке страницы")
 
-        if not is_admin(user_id):
-            viewed_ankets[user_id].add(idx)
-            save_data()
-
-        await query.edit_message_text(
-            f"🔗 Ссылка: {url}\n📝 Комментарий: {comment}\n\n"
-            "Чтобы вернуться, используйте /view")
-
-    elif data.startswith("page_"):
-        try:
-            page = int(data[5:])
-            await view_ankets(update, context, page)
-        except (ValueError, IndexError) as e:
-            logger.error(f"Error processing page data: {e}")
-            await safe_reply(update, "❌ Ошибка при обработке страницы")
-
-    elif data.startswith("admin_"):
-        if data == "admin_view_all":
-            await admin_view_all_ankets(update, context)
-        elif data == "admin_ban":
-            await query.message.reply_text(
-                "Введите ID пользователя для блокировки:")
-            context.user_data['awaiting_ban'] = True
-        elif data == "admin_delete":
-            await query.message.reply_text("Введите номер анкеты для удаления:")
-            context.user_data['awaiting_delete'] = True
-        elif data == "admin_unban":
-            await query.message.reply_text(
-                "Введите ID пользователя для разблокировки:")
-            context.user_data['awaiting_unban'] = True
+        elif query.data.startswith("admin_"):
+            if not is_admin(query.from_user.id):
+                return
+                
+            if query.data == "admin_view_all":
+                await admin_view_all_ankets(update, context)
+            elif query.data == "admin_ban":
+                await query.message.reply_text("Введите ID пользователя для блокировки:")
+                context.user_data['awaiting_ban'] = True
+            elif query.data == "admin_delete":
+                await query.message.reply_text("Введите номер анкеты для удаления:")
+                context.user_data['awaiting_delete'] = True
+            elif query.data == "admin_unban":
+                await query.message.reply_text("Введите ID пользователя для разблокировки:")
+                context.user_data['awaiting_unban'] = True
+    except Exception as e:
+        logger.error(f"Error in button_handler: {e}")
+        if query.message:
+            await query.message.reply_text("❌ Произошла ошибка при обработке запроса")
 
 async def delete_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
@@ -433,7 +397,7 @@ async def delete_anket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in channel_posts:
         try:
             await context.bot.delete_message(chat_id=CHANNEL_ID,
-                                             message_id=channel_posts[user_id])
+                                           message_id=channel_posts[user_id])
             del channel_posts[user_id]
         except Exception as e:
             logger.error(f"Ошибка удаления из канала: {e}")
@@ -465,25 +429,25 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[
         InlineKeyboardButton("Список всех анкет",
-                             callback_data="admin_view_all")
+                           callback_data="admin_view_all")
     ],
-                [
-                    InlineKeyboardButton("Заблокировать пользователя",
-                                         callback_data="admin_ban")
-                ],
-                [
-                    InlineKeyboardButton("Разблокировать пользователя",
-                                         callback_data="admin_unban")
-                ],
-                [
-                    InlineKeyboardButton("Удалить анкету",
-                                         callback_data="admin_delete")
-                ]]
+               [
+                   InlineKeyboardButton("Заблокировать пользователя",
+                                      callback_data="admin_ban")
+               ],
+               [
+                   InlineKeyboardButton("Разблокировать пользователя",
+                                      callback_data="admin_unban")
+               ],
+               [
+                   InlineKeyboardButton("Удалить анкету",
+                                      callback_data="admin_delete")
+               ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Админ-панель:", reply_markup=reply_markup)
 
 async def admin_view_all_ankets(update: Update,
-                                context: ContextTypes.DEFAULT_TYPE):
+                               context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
 
@@ -500,9 +464,8 @@ async def admin_view_all_ankets(update: Update,
         await update.message.reply_text(text[i:i + 4000])
 
 async def handle_admin_commands(update: Update,
-                                context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_user or not is_admin(
-            update.effective_user.id):
+                               context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return
 
     if context.user_data is None:
@@ -516,7 +479,7 @@ async def handle_admin_commands(update: Update,
             await update.message.reply_text(
                 f"Пользователь {user_id} заблокирован")
             log_action("BAN_USER", update.effective_user.id,
-                       f"Banned {user_id}")
+                     f"Banned {user_id}")
             context.user_data['awaiting_ban'] = False
         except Exception:
             await update.message.reply_text("Неверный ID пользователя")
@@ -530,7 +493,7 @@ async def handle_admin_commands(update: Update,
                 await update.message.reply_text(
                     f"Пользователь {user_id} разблокирован")
                 log_action("UNBAN_USER", update.effective_user.id,
-                           f"Unbanned {user_id}")
+                         f"Unbanned {user_id}")
             else:
                 await update.message.reply_text(
                     "Этот пользователь не заблокирован")
@@ -562,7 +525,7 @@ async def handle_admin_commands(update: Update,
 
                     await update.message.reply_text("Анкета удалена")
                     log_action("DELETE_ANKET", update.effective_user.id,
-                               f"Deleted anketa {idx}")
+                             f"Deleted anketa {idx}")
                 else:
                     await update.message.reply_text("Неверный номер анкеты")
                 context.user_data['awaiting_delete'] = False
@@ -577,51 +540,58 @@ async def handle_admin_commands(update: Update,
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     error = context.error
     logger.error(f'⚠️ Ошибка: {error}')
+    if update and update.effective_user:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"Ошибка в боте:\n{error}\nUser: {update.effective_user.id}"
+        )
 
 # ====== Инициализация бота ======
-def create_application():
-    application = Application.builder().token(TOKEN).build()
-    register_handlers(application)
-    return application
+application = None
 
-def register_handlers(application: Application):
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("add", add_anket))
-    application.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
-    application.add_handler(CommandHandler("delete", delete_anket))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("help_create", help_create))
-    application.add_handler(CommandHandler("donate", donate))
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(
+def create_application():
+    app = Application.builder().token(TOKEN).build()
+    register_handlers(app)
+    return app
+
+def register_handlers(app: Application):
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_anket))
+    app.add_handler(CommandHandler("view", lambda u, c: view_ankets(u, c, 0)))
+    app.add_handler(CommandHandler("delete", delete_anket))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("help_create", help_create))
+    app.add_handler(CommandHandler("donate", donate))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_ID),
         handle_message))
-    application.add_handler(MessageHandler(
+    app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
         handle_admin_commands))
-    application.add_error_handler(error_handler)
+    app.add_error_handler(error_handler)
 
 # ====== Обработчик вебхука ======
 @app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    """Обработчик вебхука от Telegram"""
+async def webhook():
+    global application
     if request.method == "POST":
         try:
             json_data = request.get_json()
             logger.info(f"Получено обновление: {json_data}")
             
-            # Создаем и инициализируем приложение
-            app = create_application()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            if application is None:
+                application = create_application()
+                await application.initialize()
+                await application.bot.set_webhook(
+                    url=WEBHOOK_URL,
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True
+                )
             
-            # Инициализация
-            loop.run_until_complete(app.initialize())
-            
-            # Обработка обновления
-            update = Update.de_json(json_data, app.bot)
-            loop.run_until_complete(app.process_update(update))
+            update = Update.de_json(json_data, application.bot)
+            await application.process_update(update)
             
             return jsonify({"status": "ok"}), 200
         except Exception as e:
@@ -632,7 +602,6 @@ def webhook():
 
 # ====== Запуск сервера ======
 def run_flask():
-    """Запускает Flask сервер"""
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🟢 Flask запускается на порту {port}")
     
@@ -641,13 +610,13 @@ def run_flask():
 
 # ====== Основная функция ======
 def main():
-    """Основная функция запуска"""
-    # Установка вебхука
-    application = create_application()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    global application
     
     try:
+        application = create_application()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         loop.run_until_complete(application.initialize())
         loop.run_until_complete(application.bot.set_webhook(
             url=WEBHOOK_URL,
@@ -656,17 +625,16 @@ def main():
         ))
         logger.info(f"🟢 Вебхук установлен: {WEBHOOK_URL}")
         
-        # Запуск Flask
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
         
-        # Бесконечный цикл
         while True:
             time.sleep(10)
     except Exception as e:
         logger.error(f"Ошибка запуска: {e}")
     finally:
-        loop.run_until_complete(application.shutdown())
+        if application:
+            loop.run_until_complete(application.shutdown())
         save_data()
         logger.info("🛑 Приложение завершило работу")
 
